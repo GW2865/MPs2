@@ -201,7 +201,7 @@ def make_clean_training_table(df: pd.DataFrame, target: str, x_coord=None, y_coo
     return X_df, y, coord_df
 
 
-def fit_rf_model(X_df, y, random_state=42, n_estimators=400, max_depth=None, min_samples_leaf=1):
+def fit_rf_model(X_df, y, random_state=42, n_estimators=158, max_depth=14, min_samples_leaf=1):
     model = RandomForestRegressor(
         n_estimators=int(n_estimators),
         random_state=int(random_state),
