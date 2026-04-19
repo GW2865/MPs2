@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 import io
 import json
-import math
-import shutil
 import tempfile
 import warnings
 from contextlib import ExitStack
@@ -15,13 +13,12 @@ import pandas as pd
 import rasterio
 import shap
 import streamlit as st
-from rasterio.io import MemoryFile
 from rasterio.windows import Window
 from sklearn.cluster import KMeans
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import GroupKFold, KFold, RandomizedSearchCV, RepeatedKFold
+from sklearn.model_selection import GroupKFold, RepeatedKFold
 
 try:
     from rasterio.vrt import WarpedVRT
@@ -30,6 +27,10 @@ except Exception:
     WarpedVRT = None
     Resampling = None
 
+
+warnings.filterwarnings("ignore", message="`sklearn.utils.parallel.delayed`")
+warnings.filterwarnings("ignore", category=UserWarning)
+
 st.set_page_config(
     page_title="MicroFragment Atlas Pro",
     page_icon="🧪",
@@ -37,7 +38,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ---------- style ----------
 
 def inject_css():
     st.markdown(
@@ -45,102 +45,81 @@ def inject_css():
         <style>
         .stApp {
             background:
-                radial-gradient(circle at 10% 12%, rgba(28, 93, 142, 0.10), transparent 24%),
-                radial-gradient(circle at 88% 14%, rgba(11, 108, 104, 0.08), transparent 24%),
-                radial-gradient(circle at 80% 76%, rgba(74, 108, 152, 0.08), transparent 28%),
-                linear-gradient(180deg, #f4f8fb 0%, #edf3f7 46%, #f8fbfd 100%);
+                radial-gradient(circle at 10% 10%, rgba(30, 64, 175, 0.10), transparent 24%),
+                radial-gradient(circle at 88% 16%, rgba(13, 148, 136, 0.10), transparent 22%),
+                linear-gradient(180deg, #f8fafc 0%, #eef4f7 100%);
         }
         .block-container {
+            max-width: 1320px;
             padding-top: 1rem;
             padding-bottom: 2rem;
-            max-width: 1320px;
         }
         .hero {
             position: relative;
             overflow: hidden;
-            padding: 1.7rem 1.9rem;
+            padding: 1.8rem 2rem;
             border-radius: 28px;
-            background: linear-gradient(135deg, rgba(19,39,63,0.96), rgba(27,78,104,0.92));
-            border: 1px solid rgba(255,255,255,0.08);
-            box-shadow: 0 24px 68px rgba(15,23,42,0.16);
+            background:
+                linear-gradient(135deg, rgba(30, 64, 175, 0.08), rgba(13, 148, 136, 0.12)),
+                rgba(255,255,255,0.78);
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            box-shadow: 0 20px 60px rgba(15, 23, 42, 0.08);
+            backdrop-filter: blur(8px);
             margin-bottom: 1rem;
-        }
-        .hero::after {
-            content: "";
-            position: absolute;
-            right: -40px;
-            bottom: -40px;
-            width: 240px;
-            height: 240px;
-            border-radius: 50%;
-            background: radial-gradient(circle, rgba(255,255,255,0.18), transparent 64%);
-            pointer-events: none;
-        }
-        .hero h1 {
-            margin: 0 0 .35rem 0;
-            color: #f8fbff;
-            font-size: 2.4rem;
-            line-height: 1.02;
-            letter-spacing: -.025em;
-        }
-        .hero p {
-            margin: 0;
-            color: rgba(248,251,255,0.86);
-            font-size: 1rem;
-            line-height: 1.58;
-            max-width: 920px;
         }
         .kicker {
             display: inline-block;
-            padding: .34rem .72rem;
+            padding: .32rem .72rem;
             border-radius: 999px;
-            background: rgba(255,255,255,0.10);
-            border: 1px solid rgba(255,255,255,0.10);
-            color: #dbeeff;
-            font-size: .8rem;
+            background: rgba(13, 148, 136, 0.10);
+            color: #0f766e;
+            font-size: .80rem;
             font-weight: 700;
-            letter-spacing: .06em;
+            letter-spacing: .05em;
             text-transform: uppercase;
             margin-bottom: .75rem;
         }
+        .hero h1 {
+            margin: 0 0 .35rem 0;
+            color: #0f172a;
+            font-size: 2.5rem;
+            line-height: 1.02;
+            letter-spacing: -.02em;
+        }
+        .hero p {
+            margin: 0;
+            color: #475569;
+            font-size: 1.02rem;
+            line-height: 1.55;
+        }
         .glass {
             border-radius: 22px;
-            border: 1px solid rgba(15,23,42,.08);
-            background: rgba(255,255,255,.86);
-            box-shadow: 0 16px 42px rgba(15,23,42,.05);
+            border: 1px solid rgba(15, 23, 42, 0.07);
+            background: rgba(255,255,255,0.82);
+            box-shadow: 0 14px 40px rgba(15,23,42,.05);
             padding: 1rem 1.05rem .9rem 1.05rem;
         }
         .tiny {
-            color: #556476;
-            font-size: .93rem;
-            line-height: 1.56;
+            color: #64748b;
+            font-size: .94rem;
+            line-height: 1.6;
         }
         .section-title {
             margin-top: .2rem;
-            margin-bottom: .52rem;
-            color: #102033;
+            margin-bottom: .45rem;
+            color: #0f172a;
             font-weight: 800;
             letter-spacing: -.02em;
         }
-        .soft-note {
-            border-radius: 16px;
-            border: 1px solid rgba(15,23,42,.08);
-            background: rgba(255,255,255,.78);
-            padding: .85rem 1rem;
-            color: #4f6073;
-            line-height: 1.55;
-            font-size: .93rem;
-            margin-bottom: .8rem;
-        }
         .stMetric {
-            background: rgba(255,255,255,.9);
+            background: rgba(255,255,255,0.88);
             border: 1px solid rgba(15,23,42,.06);
-            padding: .7rem .9rem;
+            padding: .72rem .9rem;
             border-radius: 18px;
-            box-shadow: 0 10px 26px rgba(15,23,42,.04);
+            box-shadow: 0 10px 28px rgba(15,23,42,.04);
         }
         div[data-testid="stDataFrame"] {
-            border-radius: 16px;
+            border-radius: 18px;
             overflow: hidden;
             border: 1px solid rgba(15,23,42,.08);
         }
@@ -149,9 +128,9 @@ def inject_css():
             font-weight: 700;
         }
         .sidebar-note {
-            color: #546579;
-            font-size: .92rem;
-            line-height: 1.56;
+            color: #475569;
+            font-size: .93rem;
+            line-height: 1.58;
         }
         </style>
         """,
@@ -161,7 +140,11 @@ def inject_css():
 
 inject_css()
 
-# ---------- helpers ----------
+
+def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
 def metric_dict(y_true, y_pred):
     return {
         "R2": float(r2_score(y_true, y_pred)),
@@ -169,8 +152,145 @@ def metric_dict(y_true, y_pred):
         "MAE": float(mean_absolute_error(y_true, y_pred)),
     }
 
-def df_to_csv_bytes(df):
-    return df.to_csv(index=False).encode("utf-8-sig")
+
+def load_csv(uploaded_file):
+    return pd.read_csv(uploaded_file, na_values=["#VALUE!", "NaN", "nan", "Inf", "inf"])
+
+
+def make_clean_training_table(df: pd.DataFrame, target: str, x_coord=None, y_coord=None, drop_cols=None):
+    drop_cols = drop_cols or []
+    if target not in df.columns:
+        raise ValueError(f"Target column '{target}' is not present in the uploaded table.")
+
+    exclude = {target}
+    if x_coord:
+        exclude.add(x_coord)
+    if y_coord:
+        exclude.add(y_coord)
+
+    predictors = [c for c in df.columns if c not in exclude and c not in set(drop_cols)]
+    if not predictors:
+        raise ValueError("No predictor columns remain after the current configuration.")
+
+    X_df = df[predictors].apply(pd.to_numeric, errors="coerce")
+    y = pd.to_numeric(df[target], errors="coerce")
+
+    coord_df = None
+    if x_coord and y_coord and x_coord in df.columns and y_coord in df.columns:
+        coord_df = df[[x_coord, y_coord]].apply(pd.to_numeric, errors="coerce")
+
+    good = np.isfinite(X_df.values).all(axis=1) & np.isfinite(y.values)
+    if coord_df is not None:
+        good &= np.isfinite(coord_df.values).all(axis=1)
+
+    X_df = X_df.loc[good].copy()
+    y = y.loc[good].astype(float).values
+    coord_df = None if coord_df is None else coord_df.loc[good].copy()
+
+    nunique = X_df.nunique(dropna=True)
+    non_constant = nunique[nunique > 1].index.tolist()
+    X_df = X_df[non_constant].copy()
+
+    if X_df.shape[0] < 10:
+        raise ValueError("Too few valid rows remain after numeric conversion and NA removal. At least 10 rows are recommended.")
+    if X_df.shape[1] == 0:
+        raise ValueError("All predictors became constant or invalid after preprocessing.")
+    if np.unique(y).size < 2:
+        raise ValueError("The response variable has no usable variation after preprocessing.")
+
+    return X_df, y, coord_df
+
+
+def fit_rf_model(X_df, y, random_state=42, n_estimators=400, max_depth=None, min_samples_leaf=1):
+    model = RandomForestRegressor(
+        n_estimators=int(n_estimators),
+        random_state=int(random_state),
+        max_depth=None if max_depth in [None, "None"] else int(max_depth),
+        min_samples_leaf=int(min_samples_leaf),
+        n_jobs=1,
+    )
+    model.fit(X_df.values.astype("float32", copy=False), y)
+    return model
+
+
+def evaluate_repeated_cv(X_df, y, model_params, random_state=42, cv_splits=5, cv_repeats=3):
+    rkf = RepeatedKFold(
+        n_splits=int(cv_splits),
+        n_repeats=int(cv_repeats),
+        random_state=int(random_state),
+    )
+    rows = []
+    oof_sum = np.zeros(len(y), dtype=float)
+    oof_count = np.zeros(len(y), dtype=int)
+
+    X = X_df.values.astype("float32", copy=False)
+
+    for fold_id, (tr_idx, te_idx) in enumerate(rkf.split(X), start=1):
+        model = RandomForestRegressor(**model_params)
+        model.fit(X[tr_idx], y[tr_idx])
+        pred = model.predict(X[te_idx])
+        oof_sum[te_idx] += pred
+        oof_count[te_idx] += 1
+        rows.append({"fold": fold_id, **metric_dict(y[te_idx], pred)})
+
+    oof_pred = np.divide(oof_sum, oof_count, out=np.full_like(oof_sum, np.nan, dtype=float), where=oof_count > 0)
+    oof_df = pd.DataFrame({"observed": y, "predicted_oof": oof_pred, "residual": y - oof_pred})
+    return pd.DataFrame(rows), oof_df
+
+
+def evaluate_spatial_cv(X_df, y, coord_df, model_params, random_state=42, spatial_blocks=5):
+    if coord_df is None or coord_df.empty:
+        return None, None
+
+    if len(coord_df) < int(spatial_blocks):
+        return None, None
+
+    coords = coord_df.values.astype("float32", copy=False)
+    try:
+        km = KMeans(n_clusters=int(spatial_blocks), random_state=int(random_state), n_init=10)
+        groups = km.fit_predict(coords)
+    except Exception:
+        return None, None
+
+    unique_groups = np.unique(groups)
+    if len(unique_groups) < 2:
+        return None, None
+
+    splitter = GroupKFold(n_splits=min(len(unique_groups), int(spatial_blocks)))
+    rows = []
+    oof_pred = np.full(len(y), np.nan, dtype=float)
+    X = X_df.values.astype("float32", copy=False)
+
+    for fold_id, (tr_idx, te_idx) in enumerate(splitter.split(X, y, groups=groups), start=1):
+        model = RandomForestRegressor(**model_params)
+        model.fit(X[tr_idx], y[tr_idx])
+        pred = model.predict(X[te_idx])
+        oof_pred[te_idx] = pred
+        rows.append({"fold": fold_id, **metric_dict(y[te_idx], pred)})
+
+    oof_df = pd.DataFrame({"observed": y, "predicted_spatial_oof": oof_pred, "residual": y - oof_pred})
+    return pd.DataFrame(rows), oof_df
+
+
+def compute_permutation_importance_table(model, X_df, y, random_state=42):
+    X = X_df.values.astype("float32", copy=False)
+    out = permutation_importance(
+        model,
+        X,
+        y,
+        n_repeats=10,
+        random_state=int(random_state),
+        n_jobs=1,
+    )
+    df = pd.DataFrame(
+        {
+            "feature": X_df.columns,
+            "perm_importance_mean": out.importances_mean,
+            "perm_importance_std": out.importances_std,
+        }
+    ).sort_values("perm_importance_mean", ascending=False).reset_index(drop=True)
+    return df
+
 
 def _shap_values_tree_explainer(explainer, X):
     try:
@@ -182,477 +302,301 @@ def _shap_values_tree_explainer(explainer, X):
         sv = sv[0]
     return sv
 
-def sanitize_feature_name(name: str):
-    return Path(name).stem.lower().replace("1000", "")
 
-def load_csv(uploaded_file):
-    return pd.read_csv(uploaded_file, na_values=["#VALUE!", "NaN", "nan", "Inf", "inf"])
-
-def prepare_simple_training_data(df, target, x_coord=None, y_coord=None, drop_cols=None):
-    drop_cols = drop_cols or []
-    df2 = df.copy()
-
-    required = [target]
-    if x_coord:
-        required.append(x_coord)
-    if y_coord:
-        required.append(y_coord)
-
-    keep_cols = [c for c in df2.columns if c not in set(drop_cols)]
-    df2 = df2[keep_cols].dropna()
-
-    if target not in df2.columns:
-        raise ValueError(f"Target column '{target}' is not present after exclusions.")
-
-    predictors = [c for c in df2.columns if c != target and c not in {x_coord, y_coord}]
-    if not predictors:
-        raise ValueError("No predictors remain. Please keep at least one predictor column.")
-
-    X_df = df2[predictors].apply(pd.to_numeric, errors="coerce")
-    y = pd.to_numeric(df2[target], errors="coerce").values.astype(float)
-
-    coord_df = None
-    if x_coord and y_coord and x_coord in df2.columns and y_coord in df2.columns:
-        coord_df = df2[[x_coord, y_coord]].apply(pd.to_numeric, errors="coerce")
-
-    good = np.isfinite(X_df.values).all(axis=1) & np.isfinite(y)
-    if coord_df is not None:
-        good &= np.isfinite(coord_df.values).all(axis=1)
-
-    X_df = X_df.loc[good].copy()
-    y = y[good]
-    if coord_df is not None:
-        coord_df = coord_df.loc[good].copy()
-
-    if len(X_df) < 5:
-        raise ValueError(f"Only {len(X_df)} valid rows remain after dropna()/numeric conversion. Please check the CSV.")
-    if X_df.shape[1] < 1:
-        raise ValueError("No usable predictors remain after preprocessing.")
-    if np.unique(y).size < 2:
-        raise ValueError("Target variable has fewer than 2 unique values after preprocessing.")
-
-    return X_df, y, coord_df
-
-def fit_simple_rf(X, y, n_estimators=300, random_state=42):
-    model = RandomForestRegressor(
-        n_estimators=int(n_estimators),
-        random_state=random_state,
-        n_jobs=1,
-    )
-    model.fit(X, y)
-    return model
-
-def cross_val_summary_for_fixed_model(X, y, n_estimators=300, random_state=42, cv_splits=5):
-    cv = KFold(n_splits=cv_splits, shuffle=True, random_state=random_state)
-    rows = []
-    for fold_id, (tr_idx, te_idx) in enumerate(cv.split(X), start=1):
-        m = fit_simple_rf(X[tr_idx], y[tr_idx], n_estimators=n_estimators, random_state=random_state)
-        pred = m.predict(X[te_idx])
-        rows.append({"fold": fold_id, **metric_dict(y[te_idx], pred)})
-    df_folds = pd.DataFrame(rows)
-    return df_folds, float(df_folds["R2"].mean())
-
-def compute_shap_sample(model, X_df, sample_size=200, random_state=42):
-    if len(X_df) > sample_size:
-        X_use = X_df.sample(sample_size, random_state=random_state).copy()
+def compute_sample_level_shap(model, X_df, max_rows=1200):
+    if len(X_df) > max_rows:
+        X_use = X_df.sample(max_rows, random_state=42).copy()
     else:
         X_use = X_df.copy()
+
+    X_np = X_use.values.astype("float32", copy=False)
     explainer = shap.TreeExplainer(model)
-    sv = _shap_values_tree_explainer(explainer, X_use.values.astype("float32", copy=False))
-    shap_df = pd.DataFrame(sv, columns=X_use.columns, index=X_use.index)
-    imp = pd.DataFrame({
-        "feature": X_use.columns,
-        "mean_abs_shap": np.abs(shap_df.values).mean(axis=0),
-        "mean_shap": shap_df.values.mean(axis=0),
-    }).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
-    return X_use, shap_df, imp
+    shap_values = _shap_values_tree_explainer(explainer, X_np)
+    shap_df = pd.DataFrame(shap_values, columns=X_use.columns, index=X_use.index)
+    shap_imp = pd.DataFrame(
+        {
+            "feature": X_use.columns,
+            "mean_abs_shap": np.abs(shap_values).mean(axis=0),
+        }
+    ).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
+    return X_use, shap_df, shap_imp, explainer
 
-def prepare_predictors(df, target, x_coord=None, y_coord=None, drop_cols=None):
-    drop_cols = drop_cols or []
-    exclude = {target}
-    if x_coord:
-        exclude.add(x_coord)
-    if y_coord:
-        exclude.add(y_coord)
 
-    predictors = [c for c in df.columns if c not in exclude and c not in drop_cols]
-    X_df = df[predictors].apply(pd.to_numeric, errors="coerce")
-    y = pd.to_numeric(df[target], errors="coerce").values.astype(float)
+def moving_average_curve(x, y, bins=40):
+    order = np.argsort(x)
+    x = np.asarray(x)[order]
+    y = np.asarray(y)[order]
+    if len(x) < 12:
+        return x, y
+    edges = np.linspace(np.nanmin(x), np.nanmax(x), bins + 1)
+    xs = []
+    ys = []
+    for i in range(bins):
+        mask = (x >= edges[i]) & (x <= edges[i + 1] if i == bins - 1 else x < edges[i + 1])
+        if mask.sum() >= 3:
+            xs.append(float(np.nanmean(x[mask])))
+            ys.append(float(np.nanmean(y[mask])))
+    return np.array(xs), np.array(ys)
 
-    coord_df = None
-    if x_coord and y_coord and x_coord in df.columns and y_coord in df.columns:
-        coord_df = df[[x_coord, y_coord]].apply(pd.to_numeric, errors="coerce")
-
-    good = np.isfinite(X_df.values).all(axis=1) & np.isfinite(y)
-    if coord_df is not None:
-        good &= np.isfinite(coord_df.values).all(axis=1)
-
-    return X_df.loc[good].copy(), y[good], None if coord_df is None else coord_df.loc[good].copy()
-
-def collinearity_filter(X_df, threshold=0.85, method="spearman", always_keep=None):
-    always_keep = set(always_keep or [])
-    feats0 = list(X_df.columns)
-    if len(feats0) <= 1:
-        return X_df.copy(), pd.DataFrame({"feature": feats0, "kept": True, "reason": "not_filtered"}), pd.DataFrame()
-
-    corr = X_df.corr(method=method).abs()
-    remaining = list(feats0)
-    removed = {}
-    removed_pairs = []
-
-    while True:
-        pairs = []
-        for i in range(len(remaining)):
-            for j in range(i + 1, len(remaining)):
-                a, b = remaining[i], remaining[j]
-                v = corr.loc[a, b]
-                if pd.notna(v) and v >= threshold:
-                    pairs.append((a, b, float(v)))
-        if not pairs:
-            break
-
-        a, b, v = sorted(pairs, key=lambda x: x[2], reverse=True)[0]
-        if a in always_keep and b in always_keep:
-            corr.loc[a, b] = -np.inf
-            corr.loc[b, a] = -np.inf
-            continue
-        elif a in always_keep:
-            drop, keep = b, a
-        elif b in always_keep:
-            drop, keep = a, b
-        else:
-            a_score = corr.loc[a, remaining].drop(a).mean()
-            b_score = corr.loc[b, remaining].drop(b).mean()
-            drop, keep = (a, b) if a_score >= b_score else (b, a)
-
-        remaining.remove(drop)
-        removed[drop] = f"removed_due_to_collinearity_with_{keep}"
-        removed_pairs.append({"feature_a": a, "feature_b": b, "abs_corr": v, "dropped": drop, "kept": keep})
-
-    report_rows = [{"feature": f, "kept": f in remaining, "reason": "kept" if f in remaining else removed.get(f, "removed")} for f in feats0]
-    return X_df[remaining].copy(), pd.DataFrame(report_rows), pd.DataFrame(removed_pairs)
-
-def get_param_distributions():
-    return {
-        "n_estimators": [200, 300, 500, 800],
-        "max_depth": [None, 5, 10, 15, 20, 30],
-        "min_samples_split": [2, 4, 6, 8, 10],
-        "min_samples_leaf": [1, 2, 3, 4, 5],
-        "max_features": [1.0, "sqrt", 0.5, 0.7],
-        "bootstrap": [True],
-    }
-
-def fit_best_rf(X, y, random_state=42, search_iter=20, cv_splits=5):
-    base_model = RandomForestRegressor(
-        n_estimators=300,
-        random_state=random_state,
-        n_jobs=1,
-    )
-    cv = KFold(n_splits=cv_splits, shuffle=True, random_state=random_state)
-    search = RandomizedSearchCV(
-        estimator=base_model,
-        param_distributions=get_param_distributions(),
-        n_iter=search_iter,
-        scoring="r2",
-        cv=cv,
-        n_jobs=1,
-        random_state=random_state,
-        refit=True,
-        verbose=0,
-    )
-    search.fit(X, y)
-    return search.best_estimator_, search.best_params_, float(search.best_score_)
-
-def evaluate_repeated_cv(model, X, y, random_state=42, cv_splits=5, cv_repeats=3):
-    rkf = RepeatedKFold(n_splits=cv_splits, n_repeats=cv_repeats, random_state=random_state)
-    rows = []
-    oof = np.full(y.shape[0], np.nan, dtype=float)
-    for fold_id, (tr_idx, te_idx) in enumerate(rkf.split(X), start=1):
-        m = RandomForestRegressor(**model.get_params())
-        m.fit(X[tr_idx], y[tr_idx])
-        pred = m.predict(X[te_idx])
-        first_time = np.isnan(oof[te_idx])
-        oof[te_idx[first_time]] = pred[first_time]
-        rows.append({"fold": fold_id, **metric_dict(y[te_idx], pred)})
-    return pd.DataFrame(rows), pd.DataFrame({"observed": y, "predicted_oof": oof, "residual": y - oof})
-
-def evaluate_spatial_cv(model, X, y, coord_df, random_state=42, spatial_blocks=5):
-    if coord_df is None or coord_df.empty:
-        return None, None
-    km = KMeans(n_clusters=spatial_blocks, random_state=random_state, n_init=20)
-    groups = km.fit_predict(coord_df.values)
-    n_splits = min(spatial_blocks, len(np.unique(groups)))
-    if n_splits < 2:
-        return None, None
-    gkf = GroupKFold(n_splits=n_splits)
-    rows = []
-    oof = np.full(y.shape[0], np.nan, dtype=float)
-    for fold_id, (tr_idx, te_idx) in enumerate(gkf.split(X, y, groups=groups), start=1):
-        m = RandomForestRegressor(**model.get_params())
-        m.fit(X[tr_idx], y[tr_idx])
-        pred = m.predict(X[te_idx])
-        oof[te_idx] = pred
-        rows.append({"fold": fold_id, **metric_dict(y[te_idx], pred)})
-    return pd.DataFrame(rows), pd.DataFrame({"observed": y, "predicted_spatial_oof": oof, "residual": y - oof, "group": groups})
-
-def compute_permutation_importance(model, X, y, feature_names, random_state=42):
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        pi = permutation_importance(model, X, y, n_repeats=15, random_state=random_state, n_jobs=1, scoring="r2")
-    return pd.DataFrame({
-        "feature": feature_names,
-        "perm_importance_mean": pi.importances_mean,
-        "perm_importance_std": pi.importances_std,
-    }).sort_values("perm_importance_mean", ascending=False).reset_index(drop=True)
-
-def compute_shap_summary(model, X_df):
-    explainer = shap.TreeExplainer(model)
-    sv = _shap_values_tree_explainer(explainer, X_df.values.astype("float32", copy=False))
-    shap_df = pd.DataFrame(sv, columns=X_df.columns)
-    imp = pd.DataFrame({
-        "feature": X_df.columns,
-        "mean_abs_shap": np.abs(shap_df.values).mean(axis=0),
-        "mean_shap": shap_df.values.mean(axis=0),
-    }).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
-    return shap_df, imp
 
 def fig_observed_pred(df_oof, pred_col="predicted_oof", title="Observed vs predicted"):
-    fig, ax = plt.subplots(figsize=(5.6, 5.1))
-    good = np.isfinite(df_oof["observed"]) & np.isfinite(df_oof[pred_col])
-    x = df_oof.loc[good, "observed"].values
-    y = df_oof.loc[good, pred_col].values
-    ax.scatter(x, y, s=28, alpha=0.72)
-    if len(x) > 0:
-        mn, mx = min(x.min(), y.min()), max(x.max(), y.max())
-        ax.plot([mn, mx], [mn, mx], linewidth=1.2)
+    tmp = df_oof[[c for c in ["observed", pred_col] if c in df_oof.columns]].dropna()
+    fig, ax = plt.subplots(figsize=(6.6, 5.0))
+    ax.scatter(tmp["observed"], tmp[pred_col], s=28, alpha=0.72)
+    if not tmp.empty:
+        lo = float(np.nanmin([tmp["observed"].min(), tmp[pred_col].min()]))
+        hi = float(np.nanmax([tmp["observed"].max(), tmp[pred_col].max()]))
+        ax.plot([lo, hi], [lo, hi], linestyle="--", linewidth=1.2)
     ax.set_xlabel("Observed")
     ax.set_ylabel("Predicted")
     ax.set_title(title)
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
     return fig
+
 
 def fig_barh(df, value_col, label_col="feature", title="", top_n=15, xlabel=None):
-    d = df.head(top_n).iloc[::-1]
-    fig, ax = plt.subplots(figsize=(7.2, max(4, 0.35 * len(d))))
-    ax.barh(d[label_col], d[value_col])
+    plot_df = df.head(top_n).iloc[::-1]
+    fig, ax = plt.subplots(figsize=(6.8, 5.0))
+    ax.barh(plot_df[label_col], plot_df[value_col])
     ax.set_title(title)
-    ax.set_xlabel(xlabel or value_col)
-    ax.set_ylabel("")
-    return fi
-
-def fig_value_shap_driver(x, y, feature_name, bins=60):
-    fig, ax = plt.subplots(figsize=(7.0, 4.8))
-    good = np.isfinite(x) & np.isfinite(y)
-    x = np.asarray(x)[good]
-    y = np.asarray(y)[good]
-    ax.scatter(x, y, s=18, alpha=0.35, label="Samples")
-
-    if len(x) >= 8:
-        order = np.argsort(x)
-        xs = x[order]
-        ys = y[order]
-        n = len(xs)
-        window = max(5, min(max(7, n // 12), 51))
-        if window % 2 == 0:
-            window += 1
-        smooth = pd.Series(ys).rolling(window=window, center=True, min_periods=max(3, window // 3)).mean().to_numpy()
-        valid = np.isfinite(smooth)
-        if valid.any():
-            ax.plot(xs[valid], smooth[valid], linewidth=2.2, label="Smoothed driver")
-
-    ax.axhline(0.0, linestyle="--", linewidth=1.0)
-    ax.set_xlabel(feature_name)
-    ax.set_ylabel("SHAP value")
-    ax.set_title(f"Driver process: {feature_name}")
-    ax.legend(frameon=False)
+    if xlabel:
+        ax.set_xlabel(xlabel)
+    ax.grid(axis="x", alpha=0.2)
+    fig.tight_layout()
     return fig
 
-def fig_feature_distribution(x, feature_name):
-    fig, ax = plt.subplots(figsize=(7.0, 3.8))
-    x = np.asarray(x)
-    x = x[np.isfinite(x)]
-    if len(x) > 0:
-        ax.hist(x, bins=min(40, max(10, len(x) // 8)))
-    ax.set_xlabel(feature_name)
-    ax.set_ylabel("Count")
-    ax.set_title(f"Observed distribution: {feature_name}")
-    return fig
-g
 
-# ---------- raster helpers ----------
+def fig_shap_driver(X_shap, shap_df, feature):
+    x = pd.to_numeric(X_shap[feature], errors="coerce").values.astype(float)
+    y = pd.to_numeric(shap_df[feature], errors="coerce").values.astype(float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    x = x[mask]
+    y = y[mask]
+
+    fig, axes = plt.subplots(1, 2, figsize=(11.4, 4.6), gridspec_kw={"width_ratios": [1.5, 1]})
+    axes[0].scatter(x, y, s=20, alpha=0.60)
+    xs, ys = moving_average_curve(x, y, bins=36)
+    if len(xs) > 1:
+        axes[0].plot(xs, ys, linewidth=2.0)
+    axes[0].axhline(0, linestyle="--", linewidth=1.0)
+    axes[0].set_xlabel(feature)
+    axes[0].set_ylabel("SHAP value")
+    axes[0].set_title(f"Driver response: {feature}")
+    axes[0].grid(alpha=0.2)
+
+    axes[1].hist(x, bins=28, alpha=0.85)
+    axes[1].set_xlabel(feature)
+    axes[1].set_ylabel("Frequency")
+    axes[1].set_title("Observed distribution")
+    axes[1].grid(alpha=0.2)
+
+    fig.tight_layout()
+    return fig
+
+
+def sanitize_feature_name(name: str):
+    return Path(name).stem.lower().replace("1000", "")
+
+
 def save_uploaded_rasters_to_temp(uploaded_rasters):
-    tempdir = Path(tempfile.mkdtemp(prefix="microfragment_rasters_"))
-    saved = []
-    for up in uploaded_rasters:
-        p = tempdir / up.name
-        p.write_bytes(up.getbuffer())
-        saved.append(p)
-    return tempdir, saved
+    temp_dir = tempfile.TemporaryDirectory()
+    saved_paths = []
+    for f in uploaded_rasters:
+        out = Path(temp_dir.name) / f.name
+        out.write_bytes(f.getbuffer())
+        saved_paths.append(str(out))
+    return temp_dir, saved_paths
+
 
 def find_raster_for_feature(feature, raster_paths):
-    feature_norm = feature.lower().strip()
+    target = sanitize_feature_name(feature)
     for p in raster_paths:
-        stem = sanitize_feature_name(p.name)
-        if stem == feature_norm:
-            return str(p)
+        stem = sanitize_feature_name(Path(p).stem)
+        if stem == target:
+            return p
     for p in raster_paths:
-        stem = sanitize_feature_name(p.name)
-        if feature_norm in stem or stem in feature_norm:
-            return str(p)
-    raise FileNotFoundError(f"No uploaded TIFF matched feature '{feature}'.")
+        stem = sanitize_feature_name(Path(p).stem)
+        if target in stem or stem in target:
+            return p
+    raise FileNotFoundError(f"No uploaded raster matches predictor '{feature}'.")
+
 
 def open_and_align_datasets(feature_names, raster_paths, resampling_name="bilinear"):
-    path_map = {f: find_raster_for_feature(f, raster_paths) for f in feature_names}
-    stack = ExitStack()
-    raw = {}
-    try:
-        for feat, p in path_map.items():
-            raw[feat] = stack.enter_context(rasterio.open(p))
-        ref_key = next(iter(raw.keys()))
-        ref_ds = raw[ref_key]
-        datasets = {}
-        if WarpedVRT is None or Resampling is None:
-            for feat, ds in raw.items():
-                datasets[feat] = ds
-            return stack, datasets
+    if not feature_names:
+        raise ValueError("No predictor names were provided.")
+    if WarpedVRT is None or Resampling is None:
+        raise RuntimeError("Raster alignment requires rasterio.vrt.WarpedVRT, which is not available in this environment.")
 
-        resampling = getattr(Resampling, resampling_name, Resampling.bilinear)
-        for feat, ds in raw.items():
-            same = (
-                ds.crs == ref_ds.crs and
-                ds.transform == ref_ds.transform and
-                ds.width == ref_ds.width and
-                ds.height == ref_ds.height
+    stack = ExitStack()
+    ds_dict = {}
+    try:
+        first_path = find_raster_for_feature(feature_names[0], raster_paths)
+        ref_src = stack.enter_context(rasterio.open(first_path))
+        ref_meta = {
+            "crs": ref_src.crs,
+            "transform": ref_src.transform,
+            "width": ref_src.width,
+            "height": ref_src.height,
+        }
+        ds_dict[feature_names[0]] = ref_src
+
+        resampling_map = {
+            "nearest": Resampling.nearest,
+            "bilinear": Resampling.bilinear,
+            "cubic": Resampling.cubic,
+        }
+        resampling = resampling_map.get(resampling_name, Resampling.bilinear)
+
+        for feat in feature_names[1:]:
+            path = find_raster_for_feature(feat, raster_paths)
+            src = stack.enter_context(rasterio.open(path))
+            same_grid = (
+                src.crs == ref_meta["crs"]
+                and src.transform == ref_meta["transform"]
+                and src.width == ref_meta["width"]
+                and src.height == ref_meta["height"]
             )
-            if same:
-                datasets[feat] = ds
+            if same_grid:
+                ds_dict[feat] = src
             else:
-                vrt = WarpedVRT(
-                    ds,
-                    crs=ref_ds.crs,
-                    transform=ref_ds.transform,
-                    width=ref_ds.width,
-                    height=ref_ds.height,
-                    resampling=resampling,
+                vrt = stack.enter_context(
+                    WarpedVRT(
+                        src,
+                        crs=ref_meta["crs"],
+                        transform=ref_meta["transform"],
+                        width=ref_meta["width"],
+                        height=ref_meta["height"],
+                        resampling=resampling,
+                    )
                 )
-                datasets[feat] = stack.enter_context(vrt)
-        return stack, datasets
+                ds_dict[feat] = vrt
+
+        return stack, ds_dict
     except Exception:
         stack.close()
         raise
 
+
 def _make_profile(tmpl_ds, nodata=-9999.0):
     profile = tmpl_ds.profile.copy()
-    profile["driver"] = "GTiff"
-    profile["count"] = 1
-    profile["dtype"] = "float32"
-    profile["nodata"] = float(nodata)
-    profile["compress"] = "lzw"
+    profile.update(dtype="float32", count=1, compress="lzw", nodata=nodata)
     return profile
 
+
 def read_predictor_block(datasets, feature_names, win):
-    h = int(win.height)
-    w = int(win.width)
-    p = len(feature_names)
-    stack_x = np.empty((h, w, p), dtype="float32")
-    invalid = None
-    for j, fn in enumerate(feature_names):
-        ds = datasets[fn]
-        arr = ds.read(1, window=win).astype("float32", copy=False)
+    arrays = []
+    invalid_mask = None
+    for feat in feature_names:
+        ds = datasets[feat]
+        arr = ds.read(1, window=win).astype("float32")
         inv = ~np.isfinite(arr)
         if ds.nodata is not None:
             inv |= (arr == ds.nodata)
-        invalid = inv if invalid is None else (invalid | inv)
-        stack_x[:, :, j] = arr
-    return stack_x, invalid
+        invalid_mask = inv if invalid_mask is None else (invalid_mask | inv)
+        arrays.append(arr)
+    stack_arr = np.stack(arrays, axis=-1)
+    return stack_arr, invalid_mask
 
-def build_kfold_models(best_model, X, y, cv_splits=5, random_state=42):
-    kf = KFold(n_splits=cv_splits, shuffle=True, random_state=random_state)
+
+def build_kfold_models(X_df, y, model_params, cv_splits=5, random_state=42):
+    from sklearn.model_selection import KFold
+
+    X = X_df.values.astype("float32", copy=False)
+    splitter = KFold(n_splits=int(cv_splits), shuffle=True, random_state=int(random_state))
     models = []
-    for tr_idx, te_idx in kf.split(X):
-        m = RandomForestRegressor(**best_model.get_params())
-        m.fit(X[tr_idx], y[tr_idx])
-        models.append(m)
+    for tr_idx, _ in splitter.split(X):
+        model = RandomForestRegressor(**model_params)
+        model.fit(X[tr_idx], y[tr_idx])
+        models.append(model)
     return models
 
-def run_raster_prediction(best_model, feature_names, raster_paths, X_train_df, y, cv_splits=5, random_state=42, block=512):
-    tempdir = Path(tempfile.mkdtemp(prefix="microfragment_outputs_"))
-    stack, datasets = open_and_align_datasets(feature_names, raster_paths)
-    try:
-        tmpl = datasets[next(iter(datasets.keys()))]
-        profile = _make_profile(tmpl, nodata=-9999.0)
-        pred_path = tempdir / "prediction.tif"
-        mean_unc_path = tempdir / "prediction_cv_mean.tif"
-        std_unc_path = tempdir / "prediction_cv_std.tif"
 
-        X_train = X_train_df.values.astype("float32", copy=False)
-        kfold_models = build_kfold_models(best_model, X_train, y, cv_splits=cv_splits, random_state=random_state)
+def run_raster_prediction(best_model, feature_names, raster_paths, X_train_df, y, model_params, cv_splits=5, random_state=42, block=512):
+    stack, datasets = open_and_align_datasets(feature_names, raster_paths, resampling_name="bilinear")
+    try:
+        first_key = feature_names[0]
+        tmpl = datasets[first_key]
+        out_dir = tempfile.TemporaryDirectory()
+
+        pred_path = Path(out_dir.name) / "prediction.tif"
+        mean_path = Path(out_dir.name) / "prediction_cv_mean.tif"
+        std_path = Path(out_dir.name) / "prediction_cv_std.tif"
+
+        profile = _make_profile(tmpl, nodata=-9999.0)
+        fold_models = build_kfold_models(X_train_df, y, model_params, cv_splits=cv_splits, random_state=random_state)
 
         with rasterio.open(pred_path, "w", **profile) as dst_pred, \
-             rasterio.open(mean_unc_path, "w", **profile) as dst_mean, \
-             rasterio.open(std_unc_path, "w", **profile) as dst_std:
+             rasterio.open(mean_path, "w", **profile) as dst_mean, \
+             rasterio.open(std_path, "w", **profile) as dst_std:
+
             for row0 in range(0, tmpl.height, block):
                 for col0 in range(0, tmpl.width, block):
                     h = min(block, tmpl.height - row0)
                     w = min(block, tmpl.width - col0)
                     win = Window(col0, row0, w, h)
 
-                    stack_x, invalid = read_predictor_block(datasets, feature_names, win)
-                    Xw = stack_x.reshape(-1, len(feature_names))
-                    valid = ~invalid.reshape(-1)
+                    stack_arr, invalid_mask = read_predictor_block(datasets, feature_names, win)
+                    Xw = stack_arr.reshape(-1, stack_arr.shape[-1]).astype("float32", copy=False)
+                    valid = ~invalid_mask.reshape(-1)
 
                     pred = np.full(h * w, -9999.0, dtype="float32")
-                    pred_mean = np.full(h * w, -9999.0, dtype="float32")
-                    pred_std = np.full(h * w, -9999.0, dtype="float32")
+                    meanv = np.full(h * w, -9999.0, dtype="float32")
+                    stdv = np.full(h * w, -9999.0, dtype="float32")
 
                     if np.any(valid):
-                        Xv = Xw[valid]
-                        pred[valid] = best_model.predict(Xv).astype("float32", copy=False)
-                        preds = np.column_stack([m.predict(Xv).astype("float32", copy=False) for m in kfold_models])
-                        pred_mean[valid] = preds.mean(axis=1)
-                        pred_std[valid] = preds.std(axis=1, ddof=1 if preds.shape[1] > 1 else 0)
+                        pred_valid = best_model.predict(Xw[valid]).astype("float32")
+                        pred[valid] = pred_valid
+
+                        fold_preds = np.vstack([m.predict(Xw[valid]).astype("float32") for m in fold_models])
+                        meanv[valid] = fold_preds.mean(axis=0)
+                        stdv[valid] = fold_preds.std(axis=0)
 
                     dst_pred.write(pred.reshape(h, w), 1, window=win)
-                    dst_mean.write(pred_mean.reshape(h, w), 1, window=win)
-                    dst_std.write(pred_std.reshape(h, w), 1, window=win)
-        return tempdir, pred_path, mean_unc_path, std_unc_path
+                    dst_mean.write(meanv.reshape(h, w), 1, window=win)
+                    dst_std.write(stdv.reshape(h, w), 1, window=win)
+
+        return out_dir, str(pred_path), str(mean_path), str(std_path)
     finally:
         stack.close()
 
 
-def run_single_feature_shap_raster(best_model, feature_names, raster_paths, selected_feature, block=512):
+def run_single_feature_shap_raster(model, feature_names, raster_paths, selected_feature, block=512):
     if selected_feature not in feature_names:
-        raise ValueError(f"Selected feature '{selected_feature}' is not in model predictors.")
+        raise ValueError("The selected feature is not part of the retained predictor set.")
 
-    tempdir = Path(tempfile.mkdtemp(prefix="microfragment_shap_outputs_"))
-    stack, datasets = open_and_align_datasets(feature_names, raster_paths)
+    stack, datasets = open_and_align_datasets(feature_names, raster_paths, resampling_name="bilinear")
     try:
-        tmpl = datasets[next(iter(datasets.keys()))]
+        tmpl = datasets[feature_names[0]]
+        out_dir = tempfile.TemporaryDirectory()
+        out_path = Path(out_dir.name) / f"shap_{selected_feature}.tif"
         profile = _make_profile(tmpl, nodata=-9999.0)
-        shap_path = tempdir / f"shap_{selected_feature}.tif"
-        selected_idx = feature_names.index(selected_feature)
-        explainer = shap.TreeExplainer(best_model)
 
-        with rasterio.open(shap_path, "w", **profile) as dst_shap:
+        explainer = shap.TreeExplainer(model)
+        feat_idx = feature_names.index(selected_feature)
+
+        with rasterio.open(out_path, "w", **profile) as dst:
             for row0 in range(0, tmpl.height, block):
                 for col0 in range(0, tmpl.width, block):
                     h = min(block, tmpl.height - row0)
                     w = min(block, tmpl.width - col0)
                     win = Window(col0, row0, w, h)
 
-                    stack_x, invalid = read_predictor_block(datasets, feature_names, win)
-                    Xw = stack_x.reshape(-1, len(feature_names))
-                    valid = ~invalid.reshape(-1)
+                    stack_arr, invalid_mask = read_predictor_block(datasets, feature_names, win)
+                    Xw = stack_arr.reshape(-1, stack_arr.shape[-1]).astype("float32", copy=False)
+                    valid = ~invalid_mask.reshape(-1)
 
-                    out = np.full(h * w, -9999.0, dtype="float32")
+                    out_block = np.full(h * w, -9999.0, dtype="float32")
                     if np.any(valid):
-                        Xv = Xw[valid].astype("float32", copy=False)
-                        sv = _shap_values_tree_explainer(explainer, Xv)
-                        out[valid] = sv[:, selected_idx].astype("float32", copy=False)
+                        shap_values = _shap_values_tree_explainer(explainer, Xw[valid])
+                        out_block[valid] = shap_values[:, feat_idx].astype("float32")
 
-                    dst_shap.write(out.reshape(h, w), 1, window=win)
-        return tempdir, shap_path
+                    dst.write(out_block.reshape(h, w), 1, window=win)
+
+        return out_dir, str(out_path)
     finally:
         stack.close()
+
 
 def preview_raster_png(raster_path):
     with rasterio.open(raster_path) as ds:
@@ -660,297 +604,315 @@ def preview_raster_png(raster_path):
         nodata = ds.nodata
         if nodata is not None:
             arr = np.where(arr == nodata, np.nan, arr)
-        fig, ax = plt.subplots(figsize=(6.8, 4.8))
+        fig, ax = plt.subplots(figsize=(7.0, 5.0))
         im = ax.imshow(arr, cmap="viridis")
         ax.set_title(Path(raster_path).name)
         ax.set_xticks([])
         ax.set_yticks([])
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        fig.tight_layout()
         return fig
 
+
 def export_bundle(model, feature_names, config, tables):
+    import zipfile
     bundle = io.BytesIO()
     with io.BytesIO() as m:
         joblib.dump({"model": model, "features": feature_names, "config": config}, m)
         model_bytes = m.getvalue()
 
-    import zipfile
     with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("model.joblib", model_bytes)
-        z.writestr("config.json", json.dumps(config, ensure_ascii=False, indent=2))
+        z.writestr("config.json", json.dumps(config, indent=2))
         for name, df in tables.items():
             if isinstance(df, pd.DataFrame):
                 z.writestr(f"{name}.csv", df.to_csv(index=False))
     bundle.seek(0)
     return bundle
 
-# ---------- sidebar ----------
+
 with st.sidebar:
     st.title("MicroFragment Atlas Pro")
-    st.markdown('<div class="sidebar-note">An elegant scientific workspace for microplastic fragmentation modelling, sample-level interpretation, and raster-based projection.</div>', unsafe_allow_html=True)
-    st.markdown('<div class="soft-note">Recommended workflow: upload the sample CSV, configure the response and coordinates, train the model, inspect sample-level SHAP, then run raster prediction and create a SHAP map for one selected predictor.</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="sidebar-note">A streamlined scientific app for sampling-point modelling, sample-level SHAP interpretation, and regional raster prediction with optional single-feature SHAP mapping.</div>',
+        unsafe_allow_html=True,
+    )
     csv_file = st.file_uploader("Upload sampling CSV", type=["csv"])
     raster_files = st.file_uploader("Upload predictor TIFF files", type=["tif", "tiff"], accept_multiple_files=True)
 
     st.markdown("---")
-    st.markdown("**Model controls**")
-    random_state = st.number_input("Random state", 1, 9999, 42, 1)
-    n_estimators = st.slider("Number of trees", 100, 1000, 300, 50)
+    st.subheader("Model settings")
+    random_state = st.number_input("Random state", min_value=1, max_value=9999, value=42, step=1)
+    n_estimators = st.slider("Number of trees", 100, 1000, 400, 50)
+    max_depth_option = st.selectbox("Maximum depth", ["None", 5, 10, 15, 20, 30], index=0)
+    min_samples_leaf = st.slider("Minimum samples per leaf", 1, 8, 1, 1)
     cv_splits = st.slider("CV splits", 3, 10, 5)
-    cv_repeats = st.slider("CV repeats", 1, 5, 3)
+    cv_repeats = st.slider("Repeated-CV repeats", 1, 5, 3)
     spatial_blocks = st.slider("Spatial blocks", 3, 10, 5)
-    compute_perm = st.checkbox("Compute permutation importance", value=True)
-    compute_shap = st.checkbox("Enable sample-level SHAP analysis", value=False, help="Disabled by default to reduce memory usage during deployment.")
 
-# ---------- hero ----------
+    st.markdown("---")
+    st.subheader("Interpretation")
+    enable_shap = st.toggle("Enable SHAP analysis", value=False)
+    compute_perm = st.toggle("Compute permutation importance", value=True)
+
 st.markdown(
     """
     <div class="hero">
-      <div class="kicker">Scientific modelling workspace</div>
-      <h1>MicroFragment Atlas</h1>
-      <p>Train a robust random forest model from sampling data, compare repeated and spatial cross-validation, interpret drivers with sample-level SHAP, generate regional GeoTIFF prediction surfaces, and produce a single-variable SHAP raster after prediction.</p>
+      <div class="kicker">Research-grade environmental modelling</div>
+      <h1>MicroFragment Atlas Pro</h1>
+      <p>Fit a robust random forest model from sample data, compare repeated and spatial cross-validation, inspect sample-level driver responses with SHAP, generate regional GeoTIFF predictions, and optionally map a single predictor’s SHAP contribution across space.</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-tab_overview, tab_data, tab_model, tab_validation, tab_interpret, tab_raster, tab_export = st.tabs(
-    ["Overview", "Data setup", "Model", "Validation", "Sample-level SHAP", "Raster prediction", "Export"]
+tabs = st.tabs(
+    [
+        "Overview",
+        "Data setup",
+        "Model and validation",
+        "Sample-level SHAP",
+        "Raster prediction",
+        "Export",
+    ]
 )
+tab_overview, tab_data, tab_model, tab_shap, tab_raster, tab_export = tabs
 
 if csv_file is None:
     with tab_overview:
-        st.info("Upload a CSV from the sidebar to begin.")
+        st.info("Upload a sampling CSV from the sidebar to begin.")
         c1, c2, c3 = st.columns(3)
-        c1.markdown('<div class="glass"><h4 class="section-title">Research-grade interface</h4><p class="tiny">A clean visual language designed for model building, interpretation, and publication-ready inspection.</p></div>', unsafe_allow_html=True)
-        c2.markdown('<div class="glass"><h4 class="section-title">Sample-to-region workflow</h4><p class="tiny">Move from sample-table modelling and validation to regional raster prediction in one controlled workflow.</p></div>', unsafe_allow_html=True)
-        c3.markdown('<div class="glass"><h4 class="section-title">Two-stage SHAP logic</h4><p class="tiny">First inspect SHAP at sample points, then optionally generate one spatial SHAP map after raster prediction.</p></div>', unsafe_allow_html=True)
+        c1.markdown('<div class="glass"><h4 class="section-title">Stable training workflow</h4><p class="tiny">The app uses a streamlined random forest pipeline designed for deployment stability on Streamlit Cloud.</p></div>', unsafe_allow_html=True)
+        c2.markdown('<div class="glass"><h4 class="section-title">Interpretation before mapping</h4><p class="tiny">Sample-level SHAP is placed before raster prediction so the driver mechanisms can be inspected before regional extrapolation.</p></div>', unsafe_allow_html=True)
+        c3.markdown('<div class="glass"><h4 class="section-title">Spatial SHAP after prediction</h4><p class="tiny">After successful raster prediction, a single selected predictor can be mapped as a spatial SHAP GeoTIFF.</p></div>', unsafe_allow_html=True)
     st.stop()
 
 df = load_csv(csv_file)
 
 with tab_overview:
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Rows", df.shape[0])
-    c2.metric("Columns", df.shape[1])
-    c3.metric("Missing values", int(df.isna().sum().sum()))
+    c1.metric("Rows", int(df.shape[0]))
+    c2.metric("Columns", int(df.shape[1]))
+    c3.metric("Missing cells", int(df.isna().sum().sum()))
     c4.metric("Uploaded TIFFs", len(raster_files) if raster_files else 0)
-    st.subheader("Data preview")
-    st.dataframe(df.head(12), width="stretch", height=420)
+    st.subheader("Sampling table preview")
+    st.dataframe(df.head(15), height=420, width="stretch")
 
 with tab_data:
     st.subheader("Dataset configuration")
-    st.caption("Define the response variable, optional coordinate fields, and any columns to exclude from modelling.")
     all_cols = list(df.columns)
-    col1, col2, col3 = st.columns(3)
     default_target = all_cols.index("MPs") if "MPs" in all_cols else 0
-    target = col1.selectbox("Response variable", all_cols, index=default_target)
+    c1, c2, c3 = st.columns(3)
+    target = c1.selectbox("Response variable", all_cols, index=default_target)
     x_default = ([""] + all_cols).index("Longitude") if "Longitude" in all_cols else 0
     y_default = ([""] + all_cols).index("Latitude") if "Latitude" in all_cols else 0
-    x_coord = col2.selectbox("X coordinate (optional)", [""] + all_cols, index=x_default)
-    y_coord = col3.selectbox("Y coordinate (optional)", [""] + all_cols, index=y_default)
+    x_coord = c2.selectbox("X coordinate", [""] + all_cols, index=x_default)
+    y_coord = c3.selectbox("Y coordinate", [""] + all_cols, index=y_default)
 
     possible_drop = [c for c in all_cols if c not in {target, x_coord, y_coord}]
     drop_cols = st.multiselect("Exclude columns from predictors", possible_drop, default=[])
 
     try:
-        X_filt, y, coord_df = prepare_simple_training_data(df, target, x_coord or None, y_coord or None, drop_cols)
-        mc1, mc2, mc3 = st.columns(3)
-        mc1.metric("Rows used for modelling", len(X_filt))
-        mc2.metric("Predictor count", X_filt.shape[1])
-        mc3.metric("Target", target)
-        st.markdown("**Predictors used**")
-        st.write(", ".join(list(X_filt.columns)))
-    except Exception as e:
-        X_filt, y, coord_df = None, None, None
-        st.error(f"Dataset configuration error: {e}")
+        X_df, y, coord_df = make_clean_training_table(df, target, x_coord or None, y_coord or None, drop_cols)
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Usable rows", int(len(X_df)))
+        s2.metric("Retained predictors", int(X_df.shape[1]))
+        s3.metric("Coordinate columns", 2 if coord_df is not None else 0)
 
-run_model = tab_model.button("Run modelling workflow", type="primary", width="stretch")
+        st.markdown("**Retained predictor list**")
+        st.dataframe(pd.DataFrame({"feature": X_df.columns}), height=320, width="stretch")
+    except Exception as e:
+        st.error(f"Dataset configuration error: {e}")
+        X_df, y, coord_df = None, None, None
+
+run_model = False
+with tab_model:
+    run_model = st.button("Run modelling workflow", type="primary", width="stretch")
 
 if "results" not in st.session_state:
     st.session_state["results"] = None
 
 if run_model:
-    if X_filt is None:
-        st.error("Please fix the dataset configuration first.")
-    else:
-        X = X_filt.values.astype("float32", copy=False)
+    try:
+        X_df, y, coord_df = make_clean_training_table(df, target, x_coord or None, y_coord or None, drop_cols)
+        model_params = {
+            "n_estimators": int(n_estimators),
+            "random_state": int(random_state),
+            "max_depth": None if str(max_depth_option) == "None" else int(max_depth_option),
+            "min_samples_leaf": int(min_samples_leaf),
+            "n_jobs": 1,
+        }
 
-        with st.spinner("Training fixed RandomForest model, validating performance and computing interpretation outputs..."):
-            best_model = fit_simple_rf(X, y, n_estimators=n_estimators, random_state=random_state)
-            cv_summary, mean_cv_r2 = cross_val_summary_for_fixed_model(X, y, n_estimators=n_estimators, random_state=random_state, cv_splits=cv_splits)
-            rep_folds, rep_oof = evaluate_repeated_cv(best_model, X, y, random_state=random_state, cv_splits=cv_splits, cv_repeats=cv_repeats)
-            spatial_folds, spatial_oof = evaluate_spatial_cv(best_model, X, y, coord_df, random_state=random_state, spatial_blocks=spatial_blocks)
+        with st.spinner("Training model and computing validation outputs..."):
+            best_model = fit_rf_model(
+                X_df,
+                y,
+                random_state=random_state,
+                n_estimators=n_estimators,
+                max_depth=None if str(max_depth_option) == "None" else int(max_depth_option),
+                min_samples_leaf=min_samples_leaf,
+            )
+            rep_folds, rep_oof = evaluate_repeated_cv(
+                X_df, y, model_params, random_state=random_state, cv_splits=cv_splits, cv_repeats=cv_repeats
+            )
+            spatial_folds, spatial_oof = evaluate_spatial_cv(
+                X_df, y, coord_df, model_params, random_state=random_state, spatial_blocks=spatial_blocks
+            )
 
-            rf_imp = pd.DataFrame({
-                "feature": X_filt.columns,
-                "rf_importance": best_model.feature_importances_,
-            }).sort_values("rf_importance", ascending=False).reset_index(drop=True)
+            rf_imp = pd.DataFrame(
+                {"feature": X_df.columns, "rf_importance": best_model.feature_importances_}
+            ).sort_values("rf_importance", ascending=False).reset_index(drop=True)
 
+            perm_imp = None
             if compute_perm:
-                perm_imp = compute_permutation_importance(best_model, X, y, list(X_filt.columns), random_state=random_state)
-            else:
-                perm_imp = pd.DataFrame(columns=["feature", "perm_importance_mean", "perm_importance_std"])
+                perm_imp = compute_permutation_importance_table(best_model, X_df, y, random_state=random_state)
 
-            if compute_shap:
-                shap_X, shap_df, shap_imp = compute_shap_sample(best_model, X_filt, sample_size=min(250, len(X_filt)), random_state=random_state)
-            else:
-                shap_X = X_filt.head(0).copy()
-                shap_df = pd.DataFrame(columns=X_filt.columns)
-                shap_imp = pd.DataFrame(columns=["feature", "mean_abs_shap", "mean_shap"])
+            X_shap = shap_df = shap_imp = shap_explainer = None
+            if enable_shap:
+                X_shap, shap_df, shap_imp, shap_explainer = compute_sample_level_shap(best_model, X_df)
 
         st.session_state["results"] = {
             "target": target,
             "x_coord": x_coord,
             "y_coord": y_coord,
             "drop_cols": drop_cols,
-            "X_filt": X_filt,
+            "X_df": X_df,
             "y": y,
             "coord_df": coord_df,
+            "model_params": model_params,
             "best_model": best_model,
-            "best_params": {"model_type": "Fixed RandomForestRegressor", "n_estimators": int(n_estimators), "random_state": int(random_state)},
-            "best_cv_score": mean_cv_r2,
             "rep_folds": rep_folds,
             "rep_oof": rep_oof,
             "spatial_folds": spatial_folds,
             "spatial_oof": spatial_oof,
             "rf_imp": rf_imp,
             "perm_imp": perm_imp,
-            "shap_X": shap_X,
+            "X_shap": X_shap,
             "shap_df": shap_df,
             "shap_imp": shap_imp,
-            "col_report": pd.DataFrame({"feature": list(X_filt.columns), "kept": True, "reason": "used_in_model"}),
-            "col_pairs": pd.DataFrame(),
             "raster_outputs": None,
-            "shap_raster_outputs": None,
+            "shap_raster_output": None,
         }
+        st.success("Modelling workflow completed successfully.")
+    except Exception as e:
+        st.session_state["results"] = None
+        st.error(f"Workflow failed: {e}")
 
 res = st.session_state["results"]
 
 with tab_model:
     if res is None:
-        st.info("Configure the data in the Data audit tab, then run the modelling workflow.")
+        st.info("Configure the table in the Data setup tab, then run the modelling workflow.")
     else:
+        st.subheader("Model summary")
         c1, c2, c3 = st.columns(3)
-        c1.metric("Response", res["target"])
-        c2.metric("Mean CV R²", f'{res["best_cv_score"]:.3f}')
-        c3.metric("Retained predictors", res["X_filt"].shape[1])
-        st.markdown("**Model settings**")
-        st.json(res["best_params"])
+        rep_mean_r2 = float(res["rep_folds"]["R2"].mean())
+        c1.metric("Retained predictors", int(res["X_df"].shape[1]))
+        c2.metric("Repeated-CV mean R²", f"{rep_mean_r2:.3f}")
+        c3.metric("Trees", int(res["model_params"]["n_estimators"]))
 
-with tab_validation:
-    if res is None:
-        st.info("Run the modelling workflow first.")
-    else:
+        st.markdown("**Random forest parameters**")
+        st.json(res["model_params"])
+
         st.subheader("Repeated cross-validation")
-        c1, c2 = st.columns([1.05, 0.95])
-        rep_summary = res["rep_folds"][["R2", "RMSE", "MAE"]].agg(["mean", "std"]).T.reset_index().rename(columns={"index": "metric"})
-        c1.dataframe(rep_summary, width="stretch")
-        c2.pyplot(fig_observed_pred(res["rep_oof"], "predicted_oof", "Repeated-CV prediction"))
-        st.dataframe(res["rep_folds"], width="stretch", height=260)
+        left, right = st.columns([1.0, 1.1])
+        rep_summary = (
+            res["rep_folds"][["R2", "RMSE", "MAE"]]
+            .agg(["mean", "std"])
+            .T.reset_index()
+            .rename(columns={"index": "metric"})
+        )
+        left.dataframe(rep_summary, width="stretch")
+        right.pyplot(fig_observed_pred(res["rep_oof"], "predicted_oof", "Repeated-CV prediction"))
+        st.dataframe(res["rep_folds"], height=240, width="stretch")
 
         st.subheader("Spatial cross-validation")
         if res["spatial_folds"] is None:
-            st.warning("Spatial validation was not run because valid coordinate columns were not provided.")
+            st.warning("Spatial cross-validation was skipped because valid coordinate columns were not available.")
         else:
-            s1, s2 = st.columns([1, 1])
-            spatial_summary = res["spatial_folds"][["R2", "RMSE", "MAE"]].agg(["mean", "std"]).T.reset_index().rename(columns={"index": "metric"})
+            s1, s2 = st.columns([1.0, 1.1])
+            spatial_summary = (
+                res["spatial_folds"][["R2", "RMSE", "MAE"]]
+                .agg(["mean", "std"])
+                .T.reset_index()
+                .rename(columns={"index": "metric"})
+            )
             s1.dataframe(spatial_summary, width="stretch")
             s2.pyplot(fig_observed_pred(res["spatial_oof"], "predicted_spatial_oof", "Spatial-CV prediction"))
+            st.dataframe(res["spatial_folds"], height=220, width="stretch")
 
-with tab_interpret:
+with tab_shap:
     if res is None:
         st.info("Run the modelling workflow first.")
+    elif not enable_shap:
+        st.info("SHAP analysis is currently disabled. Turn on 'Enable SHAP analysis' in the sidebar and rerun the workflow.")
     else:
-        st.subheader("Sample-level SHAP analysis")
-        st.caption("This section focuses on driver mechanisms at the sample-point level before any raster-based projection is generated.")
-
-        c1, c2, c3 = st.columns(3)
-        c1.pyplot(fig_barh(res["rf_imp"], "rf_importance", "feature", "Random forest importance", 12, "Importance"))
-        if res["perm_imp"].empty:
-            c2.info("Permutation importance was not computed.")
+        st.subheader("Global interpretation")
+        cols = st.columns(3 if res["perm_imp"] is not None else 2)
+        cols[0].pyplot(fig_barh(res["rf_imp"], "rf_importance", "feature", "Random forest importance", 15, "Importance"))
+        if res["perm_imp"] is not None:
+            cols[1].pyplot(fig_barh(res["perm_imp"], "perm_importance_mean", "feature", "Permutation importance", 15, "Mean importance"))
+            cols[2].pyplot(fig_barh(res["shap_imp"], "mean_abs_shap", "feature", "SHAP importance", 15, "Mean |SHAP|"))
         else:
-            c2.pyplot(fig_barh(res["perm_imp"], "perm_importance_mean", "feature", "Permutation importance", 12, "Mean permutation importance"))
-        if res["shap_imp"].empty:
-            c3.info("Sample-level SHAP is disabled.")
-        else:
-            c3.pyplot(fig_barh(res["shap_imp"], "mean_abs_shap", "feature", "Global SHAP importance", 12, "Mean |SHAP|"))
+            cols[1].pyplot(fig_barh(res["shap_imp"], "mean_abs_shap", "feature", "SHAP importance", 15, "Mean |SHAP|"))
 
-        if res["shap_imp"].empty:
-            st.info("Enable sample-level SHAP analysis from the sidebar to inspect variable-level driving processes.")
-        else:
-            st.markdown("### Variable driving process")
-            driver_feature = st.selectbox(
-                "Select one predictor to inspect the sample-level driving process",
-                list(res["shap_X"].columns),
-                key="sample_shap_feature",
-            )
+        st.subheader("Single-feature driver response")
+        feature_for_driver = st.selectbox("Select a predictor for detailed SHAP interpretation", list(res["X_shap"].columns))
+        st.pyplot(fig_shap_driver(res["X_shap"], res["shap_df"], feature_for_driver))
 
-            left, right = st.columns([1.4, 1.0])
-            with left:
-                st.pyplot(
-                    fig_value_shap_driver(
-                        res["shap_X"][driver_feature].values,
-                        res["shap_df"][driver_feature].values,
-                        driver_feature,
-                    )
-                )
-            with right:
-                st.pyplot(
-                    fig_feature_distribution(
-                        res["shap_X"][driver_feature].values,
-                        driver_feature,
-                    )
-                )
+        st.markdown("**Driver-response table**")
+        driver_table = pd.DataFrame(
+            {
+                "feature_value": res["X_shap"][feature_for_driver].values,
+                "shap_value": res["shap_df"][feature_for_driver].values,
+            }
+        )
+        st.dataframe(driver_table.head(500), height=280, width="stretch")
 
-            st.markdown("### Value–SHAP data view")
-            driver_df = pd.DataFrame({
-                "feature_value": res["shap_X"][driver_feature].values,
-                "shap_value": res["shap_df"][driver_feature].values,
-            }).sort_values("feature_value").reset_index(drop=True)
-            st.dataframe(driver_df, width="stretch", height=260)
-
-            with st.expander("Show interpretation tables"):
-                t1, t2 = st.columns(2)
-                t1.dataframe(res["perm_imp"], width="stretch", height=280)
-                t2.dataframe(res["shap_imp"], width="stretch", height=280)
+        with st.expander("Show all interpretation tables"):
+            e1, e2 = st.columns(2)
+            e1.dataframe(res["shap_imp"], height=260, width="stretch")
+            if res["perm_imp"] is not None:
+                e2.dataframe(res["perm_imp"], height=260, width="stretch")
 
 with tab_raster:
     if res is None:
         st.info("Run the modelling workflow first.")
     else:
         st.subheader("Regional raster prediction")
-        st.caption("Upload one TIFF per retained predictor. File names should match predictor names, optionally with the suffix 1000, for example sand1000.tif.")
-        retained = list(res["X_filt"].columns)
+        retained = list(res["X_df"].columns)
+        st.caption("Upload one TIFF per retained predictor. Raster file names should match predictor names, optionally with a 1000 suffix.")
         st.write("Retained predictors:", ", ".join(retained))
 
         if not raster_files:
-            st.warning("No TIFF files have been uploaded yet.")
+            st.warning("No predictor TIFF files have been uploaded yet.")
         else:
-            raster_names = [f.name for f in raster_files]
-            st.write("Uploaded TIFF files:", ", ".join(raster_names))
-
-            if st.button("Run raster prediction and uncertainty export", width="stretch"):
-                with st.spinner("Matching TIFF predictors, aligning rasters and generating outputs..."):
+            st.write("Uploaded TIFF files:", ", ".join([f.name for f in raster_files]))
+            run_raster = st.button("Run raster prediction and uncertainty export", width="stretch")
+            if run_raster:
+                with st.spinner("Generating prediction, cross-validated mean, and uncertainty rasters..."):
                     raster_tempdir, saved_rasters = save_uploaded_rasters_to_temp(raster_files)
                     try:
                         out_dir, pred_path, mean_path, std_path = run_raster_prediction(
                             res["best_model"],
                             retained,
                             saved_rasters,
-                            res["X_filt"],
+                            res["X_df"],
                             res["y"],
+                            res["model_params"],
                             cv_splits=cv_splits,
                             random_state=random_state,
+                            block=512,
                         )
                         res["raster_outputs"] = {
-                            "temp_rasters": str(raster_tempdir),
-                            "out_dir": str(out_dir),
-                            "prediction": str(pred_path),
-                            "mean": str(mean_path),
-                            "std": str(std_path),
+                            "temp_rasters": raster_tempdir,
+                            "out_dir": out_dir,
+                            "prediction": pred_path,
+                            "mean": mean_path,
+                            "std": std_path,
+                            "saved_rasters": saved_rasters,
                         }
-                        st.success("Raster prediction completed.")
+                        st.success("Raster prediction completed successfully.")
                     except Exception as e:
                         st.error(f"Raster prediction failed: {e}")
 
@@ -964,6 +926,7 @@ with tab_raster:
                     data=Path(outputs["prediction"]).read_bytes(),
                     file_name="prediction.tif",
                     mime="application/octet-stream",
+                    width="stretch",
                 )
             with p2:
                 st.pyplot(preview_raster_png(outputs["std"]))
@@ -972,90 +935,96 @@ with tab_raster:
                     data=Path(outputs["std"]).read_bytes(),
                     file_name="prediction_cv_std.tif",
                     mime="application/octet-stream",
+                    width="stretch",
                 )
+
             st.download_button(
                 "Download prediction_cv_mean.tif",
                 data=Path(outputs["mean"]).read_bytes(),
                 file_name="prediction_cv_mean.tif",
                 mime="application/octet-stream",
+                width="stretch",
             )
 
             st.markdown("---")
-            st.subheader("Single-variable SHAP spatial map")
-            st.caption("After raster prediction, generate a SHAP raster for one selected predictor. This keeps the workflow interpretable while controlling memory use.")
-            shap_feature = st.selectbox("Select one predictor for SHAP mapping", retained, key="shap_raster_feature")
-            if st.button("Generate SHAP raster for selected predictor", width="stretch"):
-                with st.spinner("Computing SHAP raster for the selected predictor..."):
-                    raster_tempdir, saved_rasters = save_uploaded_rasters_to_temp(raster_files)
-                    try:
-                        shap_dir, shap_path = run_single_feature_shap_raster(
-                            res["best_model"],
-                            retained,
-                            saved_rasters,
-                            shap_feature,
-                        )
-                        res["shap_raster_outputs"] = {
-                            "temp_rasters": str(raster_tempdir),
-                            "out_dir": str(shap_dir),
-                            "feature": shap_feature,
-                            "path": str(shap_path),
-                        }
-                        st.success(f"SHAP raster completed for: {shap_feature}")
-                    except Exception as e:
-                        st.error(f"SHAP raster generation failed: {e}")
+            st.subheader("Single-feature SHAP spatial map")
+            if not enable_shap:
+                st.info("Enable SHAP analysis in the sidebar and rerun the modelling workflow to use spatial SHAP mapping.")
+            else:
+                shap_feature = st.selectbox("Select a predictor for spatial SHAP mapping", retained)
+                if st.button("Generate SHAP raster for selected feature", width="stretch"):
+                    with st.spinner("Computing the selected feature's SHAP contribution across space..."):
+                        try:
+                            shap_out_dir, shap_path = run_single_feature_shap_raster(
+                                res["best_model"],
+                                retained,
+                                outputs["saved_rasters"],
+                                shap_feature,
+                                block=512,
+                            )
+                            res["shap_raster_output"] = {"out_dir": shap_out_dir, "path": shap_path, "feature": shap_feature}
+                            st.success("Spatial SHAP raster completed.")
+                        except Exception as e:
+                            st.error(f"Spatial SHAP raster failed: {e}")
 
-        if res.get("shap_raster_outputs"):
-            shap_outputs = res["shap_raster_outputs"]
-            st.pyplot(preview_raster_png(shap_outputs["path"]))
-            st.download_button(
-                f"Download SHAP raster: {shap_outputs['feature']}",
-                data=Path(shap_outputs["path"]).read_bytes(),
-                file_name=f"shap_{shap_outputs['feature']}.tif",
-                mime="application/octet-stream",
-            )
+                if res.get("shap_raster_output"):
+                    shap_out = res["shap_raster_output"]
+                    st.pyplot(preview_raster_png(shap_out["path"]))
+                    st.download_button(
+                        f"Download shap_{shap_out['feature']}.tif",
+                        data=Path(shap_out["path"]).read_bytes(),
+                        file_name=f"shap_{shap_out['feature']}.tif",
+                        mime="application/octet-stream",
+                        width="stretch",
+                    )
 
 with tab_export:
     if res is None:
         st.info("Run the modelling workflow first.")
     else:
         st.subheader("Export model bundle")
-        st.caption("Download the trained model, configuration, validation metrics, and interpretation tables as a compact archive.")
         config = {
             "target": res["target"],
             "x_coord": res["x_coord"],
             "y_coord": res["y_coord"],
             "drop_cols": res["drop_cols"],
-            "random_state": random_state,
-            "cv_splits": cv_splits,
-            "n_estimators": n_estimators,
-            "cv_repeats": cv_repeats,
-            "spatial_blocks": spatial_blocks,
+            "random_state": int(random_state),
+            "n_estimators": int(n_estimators),
+            "max_depth": str(max_depth_option),
+            "min_samples_leaf": int(min_samples_leaf),
+            "cv_splits": int(cv_splits),
+            "cv_repeats": int(cv_repeats),
+            "spatial_blocks": int(spatial_blocks),
+            "enable_shap": bool(enable_shap),
+            "compute_permutation_importance": bool(compute_perm),
         }
+        tables = {
+            "repeated_cv_metrics": res["rep_folds"],
+            "repeated_cv_oof": res["rep_oof"],
+            "rf_importance": res["rf_imp"],
+        }
+        if res["spatial_folds"] is not None:
+            tables["spatial_cv_metrics"] = res["spatial_folds"]
+            tables["spatial_cv_oof"] = res["spatial_oof"]
+        if res["perm_imp"] is not None:
+            tables["permutation_importance"] = res["perm_imp"]
+        if res["shap_imp"] is not None:
+            tables["shap_importance"] = res["shap_imp"]
+
         bundle = export_bundle(
             res["best_model"],
-            list(res["X_filt"].columns),
+            list(res["X_df"].columns),
             config,
-            {
-                "feature_selection_report": res["col_report"],
-                "collinearity_pairs": res["col_pairs"],
-                "repeated_cv_metrics": res["rep_folds"],
-                "repeated_cv_oof": res["rep_oof"],
-                "spatial_cv_metrics": res["spatial_folds"],
-                "spatial_cv_oof": res["spatial_oof"],
-                "rf_importance": res["rf_imp"],
-                "permutation_importance": res["perm_imp"],
-                "shap_importance": res["shap_imp"],
-            },
+            tables,
         )
         st.download_button(
             "Download model bundle (.zip)",
             data=bundle,
-            file_name="microfragment_model_bundle.zip",
+            file_name="microfragment_atlas_bundle.zip",
             mime="application/zip",
             width="stretch",
         )
-        st.markdown("**Quick notes**")
+        st.markdown("**Included in the bundle**")
         st.write(
-            "The bundle includes the trained model, retained feature list, full configuration, and the key validation and interpretation tables. "
-            "Raster GeoTIFF outputs are downloaded separately from the Raster prediction tab."
+            "The bundle contains the fitted model, retained predictor list, the main configuration, and key validation and interpretation tables. Raster GeoTIFF outputs are downloaded separately from the Raster prediction tab."
         )
