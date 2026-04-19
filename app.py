@@ -823,10 +823,15 @@ with tab_model:
     else:
         st.subheader("Model summary")
         c1, c2, c3 = st.columns(3)
-        rep_mean_r2 = float(res["rep_folds"]["R2"].mean())
+
+        rep_oof_valid = res["rep_oof"].dropna(subset=["observed", "predicted_oof"])
+        rep_oof_r2 = r2_score(rep_oof_valid["observed"], rep_oof_valid["predicted_oof"])
+
         c1.metric("Retained predictors", int(res["X_df"].shape[1]))
-        c2.metric("Repeated-CV mean R²", f"{rep_mean_r2:.3f}")
+        c2.metric("Repeated-CV R² (OOF)", f"{rep_oof_r2:.3f}")
         c3.metric("Trees", int(res["model_params"]["n_estimators"]))
+
+        st.caption("R² is computed from out-of-fold predictions, consistent with the prediction figure.")
 
         st.markdown("**Random forest parameters**")
         st.json(res["model_params"])
@@ -847,7 +852,10 @@ with tab_model:
         if res["spatial_folds"] is None:
             st.warning("Spatial cross-validation was skipped because valid coordinate columns were not available.")
         else:
-            s1, s2 = st.columns([1.0, 1.1])
+            spatial_valid = res["spatial_oof"].dropna(subset=["observed", "predicted_spatial_oof"])
+            spatial_oof_r2 = r2_score(spatial_valid["observed"], spatial_valid["predicted_spatial_oof"])
+
+            s1, s2, s3 = st.columns([1.0, 1.1, 0.8])
             spatial_summary = (
                 res["spatial_folds"][["R2", "RMSE", "MAE"]]
                 .agg(["mean", "std"])
@@ -856,6 +864,7 @@ with tab_model:
             )
             s1.dataframe(spatial_summary, width="stretch")
             s2.pyplot(fig_observed_pred(res["spatial_oof"], "predicted_spatial_oof", "Spatial-CV prediction"))
+            s3.metric("Spatial-CV R² (OOF)", f"{spatial_oof_r2:.3f}")
             st.dataframe(res["spatial_folds"], height=220, width="stretch")
 
 with tab_shap:
