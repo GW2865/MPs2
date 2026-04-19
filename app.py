@@ -222,7 +222,7 @@ def fit_rf_model(
     return model
 
 
-def evaluate_repeated_cv(X_df, y, model_params, random_state=42, cv_splits=5, cv_repeats=3):
+def evaluate_repeated_cv(X_df, y, model_params, random_state=42, cv_splits=5, cv_repeats=1):
     rkf = RepeatedKFold(
         n_splits=int(cv_splits),
         n_repeats=int(cv_repeats),
@@ -662,7 +662,7 @@ with st.sidebar:
     min_samples_leaf = st.slider("Minimum samples per leaf", 1, 8, 1, 1)
     min_samples_split = st.slider("Minimum samples to split", 2, 20, 2, 1)
     cv_splits = st.slider("CV splits", 3, 10, 5)
-    cv_repeats = st.slider("Repeated-CV repeats", 1, 5, 3)
+    cv_repeats = st.slider("Repeated-CV repeats", 1, 5, 1)
     spatial_blocks = st.slider("Spatial blocks", 3, 10, 5)
 
     st.markdown("---")
@@ -824,19 +824,18 @@ with tab_model:
         st.subheader("Model summary")
         c1, c2, c3 = st.columns(3)
 
-        rep_oof_valid = res["rep_oof"].dropna(subset=["observed", "predicted_oof"])
-        rep_oof_r2 = r2_score(rep_oof_valid["observed"], rep_oof_valid["predicted_oof"])
+        rep_mean_r2 = float(res["rep_folds"]["R2"].mean())
 
         c1.metric("Retained predictors", int(res["X_df"].shape[1]))
-        c2.metric("Repeated-CV R² (OOF)", f"{rep_oof_r2:.3f}")
+        c2.metric("Val R² (same as figure)", f"{rep_mean_r2:.3f}")
         c3.metric("Trees", int(res["model_params"]["n_estimators"]))
 
-        st.caption("R² is computed from out-of-fold predictions, consistent with the prediction figure.")
+        st.caption("R² is shown as the mean validation R² across folds, consistent with the figure legend.")
 
         st.markdown("**Random forest parameters**")
         st.json(res["model_params"])
 
-        st.subheader("Repeated cross-validation")
+        st.subheader("5-fold cross-validation")
         left, right = st.columns([1.0, 1.1])
         rep_summary = (
             res["rep_folds"][["R2", "RMSE", "MAE"]]
@@ -845,15 +844,14 @@ with tab_model:
             .rename(columns={"index": "metric"})
         )
         left.dataframe(rep_summary, width="stretch")
-        right.pyplot(fig_observed_pred(res["rep_oof"], "predicted_oof", "Repeated-CV prediction"))
+        right.pyplot(fig_observed_pred(res["rep_oof"], "predicted_oof", "5-fold prediction"))
         st.dataframe(res["rep_folds"], height=240, width="stretch")
 
         st.subheader("Spatial cross-validation")
         if res["spatial_folds"] is None:
             st.warning("Spatial cross-validation was skipped because valid coordinate columns were not available.")
         else:
-            spatial_valid = res["spatial_oof"].dropna(subset=["observed", "predicted_spatial_oof"])
-            spatial_oof_r2 = r2_score(spatial_valid["observed"], spatial_valid["predicted_spatial_oof"])
+            spatial_mean_r2 = float(res["spatial_folds"]["R2"].mean())
 
             s1, s2, s3 = st.columns([1.0, 1.1, 0.8])
             spatial_summary = (
@@ -864,7 +862,7 @@ with tab_model:
             )
             s1.dataframe(spatial_summary, width="stretch")
             s2.pyplot(fig_observed_pred(res["spatial_oof"], "predicted_spatial_oof", "Spatial-CV prediction"))
-            s3.metric("Spatial-CV R² (OOF)", f"{spatial_oof_r2:.3f}")
+            s3.metric("Spatial Val R²", f"{spatial_mean_r2:.3f}")
             st.dataframe(res["spatial_folds"], height=220, width="stretch")
 
 with tab_shap:
