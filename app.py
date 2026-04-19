@@ -18,7 +18,7 @@ from sklearn.cluster import KMeans
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import GroupKFold, RepeatedKFold
+from sklearn.model_selection import GroupKFold, KFold
 
 try:
     from rasterio.vrt import WarpedVRT
@@ -162,6 +162,11 @@ def make_clean_training_table(df: pd.DataFrame, target: str, x_coord=None, y_coo
     if target not in df.columns:
         raise ValueError(f"Target column '{target}' is not present in the uploaded table.")
 
+    # 与原建模脚本一致：先筛选 target > 0
+    df = df.copy()
+    y_raw = pd.to_numeric(df[target], errors="coerce")
+    df = df.loc[np.isfinite(y_raw) & (y_raw > 0)].copy()
+
     exclude = {target}
     if x_coord:
         exclude.add(x_coord)
@@ -172,27 +177,34 @@ def make_clean_training_table(df: pd.DataFrame, target: str, x_coord=None, y_coo
     if not predictors:
         raise ValueError("No predictor columns remain after the current configuration.")
 
-    X_df = df[predictors].apply(pd.to_numeric, errors="coerce")
+    # 与原脚本一致：只保留数值型预测变量
+    X_df = df[predictors].select_dtypes(include=np.number).copy()
+    if X_df.shape[1] == 0:
+        raise ValueError("No numeric predictor columns remain after filtering.")
+
+    # 与原脚本一致：inf -> nan -> 按列均值填补
+    X_df = X_df.replace([np.inf, -np.inf], np.nan)
+    X_df = X_df.fillna(X_df.mean())
+
+    # y 仅要求为数值且有限
     y = pd.to_numeric(df[target], errors="coerce")
+    good_y = np.isfinite(y.values)
+
+    X_df = X_df.loc[good_y].copy()
+    y = y.loc[good_y].astype(float).values
 
     coord_df = None
     if x_coord and y_coord and x_coord in df.columns and y_coord in df.columns:
-        coord_df = df[[x_coord, y_coord]].apply(pd.to_numeric, errors="coerce")
+        coord_df = df.loc[X_df.index, [x_coord, y_coord]].apply(pd.to_numeric, errors="coerce")
+        coord_df = coord_df.replace([np.inf, -np.inf], np.nan)
 
-    good = np.isfinite(X_df.values).all(axis=1) & np.isfinite(y.values)
-    if coord_df is not None:
-        good &= np.isfinite(coord_df.values).all(axis=1)
-
-    X_df = X_df.loc[good].copy()
-    y = y.loc[good].astype(float).values
-    coord_df = None if coord_df is None else coord_df.loc[good].copy()
-
+    # 删除常数列
     nunique = X_df.nunique(dropna=True)
     non_constant = nunique[nunique > 1].index.tolist()
     X_df = X_df[non_constant].copy()
 
     if X_df.shape[0] < 10:
-        raise ValueError("Too few valid rows remain after numeric conversion and NA removal. At least 10 rows are recommended.")
+        raise ValueError("Too few valid rows remain after preprocessing. At least 10 rows are recommended.")
     if X_df.shape[1] == 0:
         raise ValueError("All predictors became constant or invalid after preprocessing.")
     if np.unique(y).size < 2:
@@ -223,32 +235,32 @@ def fit_rf_model(
 
 
 def evaluate_repeated_cv(X_df, y, model_params, random_state=42, cv_splits=5, cv_repeats=1):
-    rkf = RepeatedKFold(
+    # 与原出图脚本完全一致：普通 KFold
+    splitter = KFold(
         n_splits=int(cv_splits),
-        n_repeats=int(cv_repeats),
+        shuffle=True,
         random_state=int(random_state),
     )
-    rows = []
-    oof_sum = np.zeros(len(y), dtype=float)
-    oof_count = np.zeros(len(y), dtype=int)
 
+    rows = []
+    oof_pred = np.full(len(y), np.nan, dtype=float)
     X = X_df.values.astype("float32", copy=False)
 
-    for fold_id, (tr_idx, te_idx) in enumerate(rkf.split(X), start=1):
+    for fold_id, (tr_idx, te_idx) in enumerate(splitter.split(X), start=1):
         model = RandomForestRegressor(**model_params)
         model.fit(X[tr_idx], y[tr_idx])
         pred = model.predict(X[te_idx])
-        oof_sum[te_idx] += pred
-        oof_count[te_idx] += 1
+
+        oof_pred[te_idx] = pred
         rows.append({"fold": fold_id, **metric_dict(y[te_idx], pred)})
 
-    oof_pred = np.divide(
-        oof_sum,
-        oof_count,
-        out=np.full_like(oof_sum, np.nan, dtype=float),
-        where=oof_count > 0,
+    oof_df = pd.DataFrame(
+        {
+            "observed": y,
+            "predicted_oof": oof_pred,
+            "residual": y - oof_pred,
+        }
     )
-    oof_df = pd.DataFrame({"observed": y, "predicted_oof": oof_pred, "residual": y - oof_pred})
     return pd.DataFrame(rows), oof_df
 
 
@@ -256,10 +268,15 @@ def evaluate_spatial_cv(X_df, y, coord_df, model_params, random_state=42, spatia
     if coord_df is None or coord_df.empty:
         return None, None
 
-    if len(coord_df) < int(spatial_blocks):
+    coord_valid = np.isfinite(coord_df.values).all(axis=1)
+    if coord_valid.sum() < int(spatial_blocks):
         return None, None
 
-    coords = coord_df.values.astype("float32", copy=False)
+    X_sp = X_df.loc[coord_valid].copy()
+    y_sp = y[coord_valid]
+    coord_sp = coord_df.loc[coord_valid].copy()
+
+    coords = coord_sp.values.astype("float32", copy=False)
     try:
         km = KMeans(n_clusters=int(spatial_blocks), random_state=int(random_state), n_init=10)
         groups = km.fit_predict(coords)
@@ -272,17 +289,17 @@ def evaluate_spatial_cv(X_df, y, coord_df, model_params, random_state=42, spatia
 
     splitter = GroupKFold(n_splits=min(len(unique_groups), int(spatial_blocks)))
     rows = []
-    oof_pred = np.full(len(y), np.nan, dtype=float)
-    X = X_df.values.astype("float32", copy=False)
+    oof_pred = np.full(len(y_sp), np.nan, dtype=float)
+    X = X_sp.values.astype("float32", copy=False)
 
-    for fold_id, (tr_idx, te_idx) in enumerate(splitter.split(X, y, groups=groups), start=1):
+    for fold_id, (tr_idx, te_idx) in enumerate(splitter.split(X, y_sp, groups=groups), start=1):
         model = RandomForestRegressor(**model_params)
-        model.fit(X[tr_idx], y[tr_idx])
+        model.fit(X[tr_idx], y_sp[tr_idx])
         pred = model.predict(X[te_idx])
         oof_pred[te_idx] = pred
-        rows.append({"fold": fold_id, **metric_dict(y[te_idx], pred)})
+        rows.append({"fold": fold_id, **metric_dict(y_sp[te_idx], pred)})
 
-    oof_df = pd.DataFrame({"observed": y, "predicted_spatial_oof": oof_pred, "residual": y - oof_pred})
+    oof_df = pd.DataFrame({"observed": y_sp, "predicted_spatial_oof": oof_pred, "residual": y_sp - oof_pred})
     return pd.DataFrame(rows), oof_df
 
 
@@ -514,8 +531,6 @@ def read_predictor_block(datasets, feature_names, win):
 
 
 def build_kfold_models(X_df, y, model_params, cv_splits=5, random_state=42):
-    from sklearn.model_selection import KFold
-
     X = X_df.values.astype("float32", copy=False)
     splitter = KFold(n_splits=int(cv_splits), shuffle=True, random_state=int(random_state))
     models = []
@@ -662,7 +677,6 @@ with st.sidebar:
     min_samples_leaf = st.slider("Minimum samples per leaf", 1, 8, 1, 1)
     min_samples_split = st.slider("Minimum samples to split", 2, 20, 2, 1)
     cv_splits = st.slider("CV splits", 3, 10, 5)
-    cv_repeats = st.slider("Repeated-CV repeats", 1, 5, 1)
     spatial_blocks = st.slider("Spatial blocks", 3, 10, 5)
 
     st.markdown("---")
@@ -770,7 +784,7 @@ if run_model:
                 min_samples_split=min_samples_split,
             )
             rep_folds, rep_oof = evaluate_repeated_cv(
-                X_df, y, model_params, random_state=random_state, cv_splits=cv_splits, cv_repeats=cv_repeats
+                X_df, y, model_params, random_state=random_state, cv_splits=cv_splits, cv_repeats=1
             )
             spatial_folds, spatial_oof = evaluate_spatial_cv(
                 X_df, y, coord_df, model_params, random_state=random_state, spatial_blocks=spatial_blocks
@@ -784,9 +798,9 @@ if run_model:
             if compute_perm:
                 perm_imp = compute_permutation_importance_table(best_model, X_df, y, random_state=random_state)
 
-            X_shap = shap_df = shap_imp = shap_explainer = None
+            X_shap = shap_df = shap_imp = None
             if enable_shap:
-                X_shap, shap_df, shap_imp, shap_explainer = compute_sample_level_shap(best_model, X_df)
+                X_shap, shap_df, shap_imp, _ = compute_sample_level_shap(best_model, X_df)
 
         st.session_state["results"] = {
             "target": target,
@@ -1018,14 +1032,13 @@ with tab_export:
             "min_samples_leaf": int(min_samples_leaf),
             "min_samples_split": int(min_samples_split),
             "cv_splits": int(cv_splits),
-            "cv_repeats": int(cv_repeats),
             "spatial_blocks": int(spatial_blocks),
             "enable_shap": bool(enable_shap),
             "compute_permutation_importance": bool(compute_perm),
         }
         tables = {
-            "repeated_cv_metrics": res["rep_folds"],
-            "repeated_cv_oof": res["rep_oof"],
+            "cv_metrics": res["rep_folds"],
+            "cv_oof": res["rep_oof"],
             "rf_importance": res["rf_imp"],
         }
         if res["spatial_folds"] is not None:
